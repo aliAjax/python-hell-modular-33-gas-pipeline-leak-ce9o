@@ -70,6 +70,17 @@ class Repository:
                     event_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS relations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    parent_item_id INTEGER NOT NULL,
+                    child_item_id INTEGER NOT NULL,
+                    relation TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(parent_item_id, child_item_id, relation),
+                    FOREIGN KEY(parent_item_id) REFERENCES items(id),
+                    FOREIGN KEY(child_item_id) REFERENCES items(id)
+                );
                 """
             )
         finally:
@@ -105,7 +116,8 @@ class Repository:
             (item_id, event_type, actor, role, canonical_json(payload), previous, event_hash, event["created_at"]),
         )
 
-    def create_item(self, entity_type, stable_key, initial_status, payload, actor, role):
+    def create_item(self, entity_type, stable_key, initial_status, payload, actor, role,
+                    created_event_type="created", created_event_payload=None):
         conn = self.connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -127,7 +139,8 @@ class Repository:
             except sqlite3.IntegrityError:
                 raise ConflictError("duplicate_item", "同一业务实体已经存在")
             item_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-            self.append_audit(conn, item_id, "created", actor, role, {"stable_key": stable_key})
+            event_payload = created_event_payload if created_event_payload is not None else {"stable_key": stable_key}
+            self.append_audit(conn, item_id, created_event_type, actor, role, event_payload)
             conn.execute("COMMIT")
             return self.get_item(item_id)
         except Exception:
@@ -257,5 +270,80 @@ class Repository:
             for row in conn.execute("SELECT status, COUNT(*) AS total FROM items GROUP BY status").fetchall():
                 counts[row["status"]] = row["total"]
             return {"counts": counts, "items": self.list_items()}
+        finally:
+            conn.close()
+
+    def find_item_by_stable_key(self, entity_type, stable_key):
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM items WHERE entity_type=? AND stable_key=?",
+                (entity_type, stable_key),
+            ).fetchone()
+            return self._row_to_item(row) if row else None
+        finally:
+            conn.close()
+
+    def record_escalation(self, item_id, new_response, record, actor, role):
+        """超时自动升级：写入新的响应档位/时限并追加审计（不推进处置状态、不占用乐观版本）。"""
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT payload FROM items WHERE id=?", (item_id,)).fetchone()
+            if row is None:
+                raise NotFoundError("item_not_found", "业务实体不存在")
+            payload = json.loads(row["payload"])
+            payload["response"] = new_response
+            conn.execute(
+                "UPDATE items SET payload=?,updated_at=? WHERE id=?",
+                (canonical_json(payload), now_iso(), item_id),
+            )
+            self.append_audit(conn, item_id, "auto_escalated", actor, role, record)
+            conn.execute("COMMIT")
+            return record
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            conn.close()
+
+    def record_relation(self, parent_item_id, child_item_id, relation, actor, role, payload):
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    "INSERT INTO relations(parent_item_id,child_item_id,relation,payload,created_at) VALUES(?,?,?,?,?)",
+                    (parent_item_id, child_item_id, relation, canonical_json(payload), now_iso()),
+                )
+            except sqlite3.IntegrityError:
+                pass
+            self.append_audit(conn, parent_item_id, relation, actor, role, payload)
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            conn.close()
+
+    def list_relations(self, parent_item_id):
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM relations WHERE parent_item_id=? ORDER BY id",
+                (parent_item_id,),
+            ).fetchall()
+            result = []
+            for row in rows:
+                value = dict(row)
+                value["payload"] = json.loads(value["payload"])
+                result.append(value)
+            return result
         finally:
             conn.close()

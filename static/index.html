@@ -1,5 +1,284 @@
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>燃气管线泄漏响应</title><body><h1>燃气管线泄漏检测与隔离协调</h1><p>使用 JSON API 创建泄漏事件、登记巡检或传感记录，并完成核验、隔离、抢修、试压与恢复。</p><pre>GET /health
-GET /api/state
-POST /api/items
-POST /api/items/{id}/sources
-POST /api/items/{id}/actions</pre></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>燃气管线泄漏分级响应与隔离协调</title>
+<style>
+  :root { --major:#c0392b; --elev:#d35400; --ord:#27632a; --line:#d8dde3; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; background:#f4f6f8; color:#1f2d3d; }
+  header { background:#1f3540; color:#fff; padding:14px 24px; }
+  header h1 { margin:0; font-size:18px; }
+  header p { margin:4px 0 0; font-size:13px; color:#c3d0d8; }
+  .wrap { display:flex; gap:16px; padding:16px 24px; align-items:flex-start; flex-wrap:wrap; }
+  .panel { background:#fff; border:1px solid var(--line); border-radius:8px; padding:14px 16px; }
+  .panel h2 { font-size:14px; margin:0 0 10px; }
+  .left { flex:0 0 340px; }
+  .right { flex:1; min-width:420px; }
+  label { display:block; font-size:12px; margin:8px 0 2px; color:#516; color:#566; }
+  input, select, textarea { width:100%; padding:6px 8px; border:1px solid #c4ccd4; border-radius:4px; font-size:13px; }
+  textarea { font-family:ui-monospace,Menlo,monospace; min-height:140px; }
+  button { margin-top:10px; padding:7px 14px; border:0; border-radius:4px; background:#23608a; color:#fff; font-size:13px; cursor:pointer; }
+  button.ghost { background:#e7edf2; color:#23608a; }
+  button:disabled { background:#bbb; cursor:not-allowed; }
+  .row { display:flex; gap:8px; }
+  .row > div { flex:1; }
+  .cards { display:flex; flex-direction:column; gap:12px; }
+  .card { border:1px solid var(--line); border-left-width:5px; border-radius:8px; background:#fff; padding:12px 14px; }
+  .card.major { border-left-color:var(--major); }
+  .card.elevated { border-left-color:var(--elev); }
+  .card.ordinary { border-left-color:var(--ord); }
+  .card.restored, .card.cancelled { opacity:.75; border-left-color:#8899a6; }
+  .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; color:#fff; }
+  .badge.major { background:var(--major); } .badge.elevated { background:var(--elev); } .badge.ordinary { background:var(--ord); }
+  .badge.status { background:#4a6577; }
+  .meta { font-size:12px; color:#677; margin-top:6px; line-height:1.7; }
+  .sla { font-weight:600; }
+  .sla.overdue { color:var(--major); }
+  .sla.warn { color:var(--elev); }
+  .sla.ok { color:var(--ord); }
+  .sla.done { color:#778899; font-weight:400; }
+  .escalations { margin:8px 0 0; padding-left:18px; font-size:12px; color:#8a2a1c; }
+  .impact { margin-top:8px; font-size:12px; background:#f2f7fb; border-radius:6px; padding:6px 10px; }
+  .related { margin-top:8px; font-size:12px; background:#fdf4ea; border-radius:6px; padding:6px 10px; }
+  details { margin-top:8px; }
+  summary { cursor:pointer; font-size:12px; color:#23608a; }
+  pre { font-size:11px; background:#f0f3f5; padding:8px; border-radius:6px; overflow:auto; max-height:260px; }
+  .err { color:var(--major); font-size:12px; margin-top:8px; white-space:pre-wrap; }
+  .ok-msg { color:var(--ord); font-size:12px; margin-top:8px; }
+  .toolbar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  .toolbar select { width:auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>燃气管线泄漏分级响应与隔离协调</h1>
+  <p>按评分分一般 / 较大 / 重大三档；重大事件上报后 30 分钟内完成核验，超时自动升一档并登记卡点；核验后登记影响管段与用户，隔离请求携带影响面；恢复后新记录另建关联事件。</p>
+</header>
+<div class="wrap">
+  <div class="left">
+    <div class="panel">
+      <h2>身份</h2>
+      <label>用户</label><input id="actor" value="dispatch-1">
+      <label>角色</label>
+      <select id="role">
+        <option value="dispatcher">dispatcher（调度）</option>
+        <option value="responder">responder（现场）</option>
+        <option value="supervisor">supervisor（主管）</option>
+        <option value="technician">technician（技工）</option>
+        <option value="sensor">sensor（传感网关）</option>
+        <option value="patrol">patrol（巡检）</option>
+      </select>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <h2>新建泄漏报警</h2>
+      <div class="row"><div><label>管线</label><input id="f-pipe" value="P-1"></div>
+      <div><label>管段</label><input id="f-seg" value="S-8"></div></div>
+      <div class="row"><div><label>压降 kPa</label><input id="f-drop" type="number" value="60"></div>
+      <div><label>浓度 ppm</label><input id="f-ppm" type="number" value="400"></div>
+      <div><label>异味报告</label><input id="f-odor" type="number" value="4"></div></div>
+      <label>上报时间（ISO，留空=现在）</label><input id="f-at" placeholder="2026-09-27T08:00:00+00:00">
+      <button onclick="createItem()">创建并评分分档</button>
+      <div id="create-msg"></div>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <h2>超时督办</h2>
+      <p style="font-size:12px;color:#566;margin:0 0 6px">读取列表、加记录、执行操作时会自动扫描；也可手动触发。</p>
+      <button class="ghost" onclick="sweep()">立即扫描超时事件</button>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="toolbar">
+      <button class="ghost" onclick="load()">刷新</button>
+      <label style="margin:0">筛选状态</label>
+      <select id="filter" onchange="load()">
+        <option value="">全部</option>
+        <option>reported</option><option>verified</option><option>isolated</option>
+        <option>repaired</option><option>tested</option><option>restored</option><option>cancelled</option>
+      </select>
+      <span id="sweep-msg" style="font-size:12px"></span>
+    </div>
+    <div id="cards" class="cards"></div>
+  </div>
+</div>
+
+<script>
+let ITEMS = [];
+function headers() {
+  return {"Content-Type": "application/json", "X-User-Id": document.getElementById("actor").value.trim() || "anon",
+          "X-Role": document.getElementById("role").value};
+}
+function esc(s){ return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function fmtSla(v) {
+  if (v == null) return '<span class="sla done">已办结，无时限</span>';
+  let cls = "ok", text;
+  if (v.overdue) { cls = "overdue"; text = "已超时 " + Math.abs(v.remaining_minutes) + " 分钟"; }
+  else {
+    if (v.tier === "major" && v.remaining_minutes <= 10) cls = "warn";
+    text = "剩余 " + v.remaining_minutes + " 分钟（时限 " + v.sla_minutes + " 分钟）";
+  }
+  let dl = v.deadline ? '，截止 ' + esc(v.deadline.replace("T"," ").slice(0,16)) : "";
+  let blocked = v.blocked_step ? '，卡在：<b>' + esc(v.blocked_step) + '</b>' : "";
+  return '<span class="sla ' + cls + '">' + text + dl + blocked + '</span>';
+}
+function tierBadge(t) {
+  let m = {major:"重大", elevated:"较大", ordinary:"一般"};
+  return '<span class="badge ' + t + '">' + (m[t] || t) + '</span>';
+}
+function actionForm(it) {
+  let id = it.id, v = it.version, s = it.status;
+  let btn = (action, label, fields) =>
+    '<button onclick="doAction(' + id + ',\'' + action + '\',' + v + ',this)" ' +
+    'data-fields=\'' + encodeURIComponent(JSON.stringify(fields)) + '\'>' + label + '</button>';
+  if (s === "reported") return btn("verify","现场核验通过", [{field_confirmed:true}]);
+  if (s === "verified") {
+    let impact = it.payload.impact;
+    let html = impact
+      ? '<div class="impact">已登记影响面：管段 ' + esc(impact.affected_segments.join("、")) +
+        '；用户 ' + esc(impact.affected_users.join("、")) + '</div>'
+      : '<div class="impact" style="color:#c0392b">尚未登记影响范围，隔离将被退回</div>';
+    html += '<div style="margin-top:6px">' +
+      btn("register_impact","登记/更新影响范围", [{affected_segments:["S-8","S-9"], affected_users:["U-1001"]}]) +
+      btn("isolate","提交隔离（阀门顺序）", [{valve_sequence:["V-1","V-2"]}]) + '</div>';
+    return html;
+  }
+  if (s === "isolated") return btn("repair","完成抢修", [{work_order:"WO-1"}]);
+  if (s === "repaired") return btn("pressure_test","试压通过", [{test_passed:true, pressure_kpa:150, minimum_pressure_kpa:100}]);
+  if (s === "tested") return btn("restore","恢复供气", [{hazards_clear:true}]);
+  return "";
+}
+function sourceForm(it) {
+  if (["restored","cancelled"].includes(it.status)) {
+    return '<details><summary>登记新来源（恢复后将另建关联事件）</summary>' + sourceFields(it.id) + '</details>';
+  }
+  return '<details><summary>登记巡检 / 传感来源</summary>' + sourceFields(it.id) + '</details>';
+}
+function sourceFields(id) {
+  return '<label>类型</label><input class="src-type" value="sensor">' +
+    '<label>外部编号</label><input class="src-ext" value="SN-001">' +
+    '<label>观测时间（ISO，留空=现在）</label><input class="src-at" placeholder="">' +
+    '<label>浓度 ppm</label><input class="src-ppm" type="number" value="260">' +
+    '<button onclick="addSource(' + id + ',this)">提交来源</button><div class="err"></div>';
+}
+function renderCard(it) {
+  let p = it.payload, v = it.response_view, cls = v.tier + " " + it.status;
+  let html = '<div class="card ' + cls + '"><div>' +
+    tierBadge(v.tier) + ' <span class="badge status">#' + it.id + ' ' + esc(it.status) + '</span>' +
+    ' <b>' + esc(p.pipeline_id) + ' / ' + esc(p.segment_id) + '</b>' +
+    ' <span style="font-size:12px;color:#677">评分 ' + (it.assessment && it.assessment.score) + '</span></div>';
+  html += '<div class="meta">' + fmtSla(v) + '<br>上报：' + esc(p.reported_at) + ' ｜ 报告人：' + esc(p.reporter) + '</div>';
+  if (v.escalations && v.escalations.length) {
+    html += '<ul class="escalations">';
+    for (let e of v.escalations) {
+      html += '<li><b>升级记录</b>：' + esc(e.at.replace("T"," ").slice(0,16)) +
+        ' ' + ({ordinary:"一般",elevated:"较大",major:"重大"}[e.from_tier]||e.from_tier) + ' → ' +
+        ({ordinary:"一般",elevated:"较大",major:"重大"}[e.to_tier]||e.to_tier) +
+        '，卡在「' + esc(e.blocked_step_label) + '」（' + esc(e.reason) + '，原截止 ' +
+        esc((e.deadline||"").replace("T"," ").slice(0,16)) + '）</li>';
+    }
+    html += '</ul>';
+  }
+  if (p.impact) {
+    html += '<div class="impact"><b>影响范围</b><br>受影响管段：' + esc(p.impact.affected_segments.join("、")) +
+      '<br>受影响用户：' + esc(p.impact.affected_users.join("、")) +
+      (p.impact.registered_by ? '<br>登记人：' + esc(p.impact.registered_by) : "") + '</div>';
+  }
+  if (it.related) {
+    html += '<div class="related"><b>关联事件</b>：本事件为已恢复事件 #' + esc(it.related.item_id) +
+      ' 的复发关联事件（' + esc(it.related.description) + '）</div>';
+  }
+  if (it.followups && it.followups.length) {
+    for (let f of it.followups) {
+      html += '<div class="related"><b>复发关联事件</b>：恢复供气后新记录已另建 <a href="#" onclick="jump(' +
+        f.child_item_id + ');return false">#' + f.child_item_id + '</a>（' +
+        esc(f.payload.description || "") + '）</div>';
+    }
+  }
+  html += '<div style="margin-top:8px">' + actionForm(it) + '</div>' + sourceForm(it);
+  html += '<details><summary>审计链 / 原始数据</summary><pre>' + esc(JSON.stringify(it, null, 2)) + '</pre></details>';
+  html += '<div class="err"></div></div>';
+  return html;
+}
+function jump(id) {
+  document.getElementById("filter").value = "";
+  load(id);
+}
+async function load(focusId) {
+  let status = document.getElementById("filter").value;
+  let r = await fetch("/api/items" + (status ? "?status=" + encodeURIComponent(status) : ""));
+  let data = await r.json();
+  ITEMS = data.items || [];
+  document.getElementById("cards").innerHTML = ITEMS.map(renderCard).join("") ||
+    '<div class="panel">暂无事件</div>';
+  if (focusId) {
+    let el = [...document.querySelectorAll(".card")].find(c => c.textContent.includes("#" + focusId + " "));
+    if (el) el.scrollIntoView({behavior:"smooth"});
+  }
+}
+async function api(path, method, body) {
+  let r = await fetch(path, {method, headers:headers(), body: JSON.stringify(body)});
+  let data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(data.message || ("HTTP " + r.status)), {code:data.error});
+  return data;
+}
+async function createItem() {
+  let box = document.getElementById("create-msg");
+  let at = document.getElementById("f-at").value.trim() || new Date().toISOString();
+  try {
+    let it = await api("/api/items", "POST", {
+      pipeline_id: document.getElementById("f-pipe").value.trim(),
+      segment_id: document.getElementById("f-seg").value.trim(),
+      reported_at: at,
+      pressure_drop_kpa: Number(document.getElementById("f-drop").value),
+      sensor_value_ppm: Number(document.getElementById("f-ppm").value),
+      odor_reports: Number(document.getElementById("f-odor").value),
+      reporter: document.getElementById("actor").value.trim() || "dispatch"
+    });
+    box.className = "ok-msg";
+    box.textContent = "已创建 #" + it.id + "，评分 " + it.payload.assessment.score +
+      "，分档：" + ({major:"重大",elevated:"较大",ordinary:"一般"}[it.payload.response.tier]) +
+      "，核验时限 " + it.payload.response.sla_minutes + " 分钟";
+    document.getElementById("filter").value = "";
+    load(it.id);
+  } catch (e) { box.className = "err"; box.textContent = "[" + (e.code||"error") + "] " + e.message; }
+}
+async function doAction(id, action, version, btn) {
+  let fields = JSON.parse(decodeURIComponent(btn.dataset.fields));
+  let body = Object.assign({action, expected_version: version}, fields[0] || {});
+  try {
+    await api("/api/items/" + id + "/actions", "POST", body);
+    await load();
+  } catch (e) {
+    let box = btn.closest(".card").querySelector(".err:last-of-type");
+    (box || btn.parentElement).textContent = "[" + (e.code||"error") + "] " + e.message;
+    if (e.code === "version_conflict" || e.code === "impact_not_registered") load();
+  }
+}
+async function addSource(id, btn) {
+  let box = btn.parentElement.querySelector(".err");
+  box.textContent = "";
+  let q = s => btn.parentElement.querySelector(s);
+  let at = q(".src-at").value.trim() || new Date().toISOString();
+  let body = {source_type: q(".src-type").value.trim(), external_id: q(".src-ext").value.trim(),
+              observed_at: at,
+              sensor_value_ppm: Number(q(".src-ppm").value)};
+  try {
+    let r = await api("/api/items/" + id + "/sources", "POST", body);
+    await load(r.followup_item_id);
+  } catch (e) { box.textContent = "[" + (e.code||"error") + "] " + e.message; }
+}
+async function sweep() {
+  let box = document.getElementById("sweep-msg");
+  try {
+    let r = await api("/api/escalations/sweep", "POST", {});
+    box.textContent = r.escalated.length ? "督办升级 " + r.escalated.length + " 件" : "无超时事件";
+    load();
+  } catch (e) { box.textContent = "[" + (e.code||"error") + "] " + e.message; }
+}
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>
