@@ -1,5 +1,229 @@
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>燃气管线泄漏响应</title><body><h1>燃气管线泄漏检测与隔离协调</h1><p>使用 JSON API 创建泄漏事件、登记巡检或传感记录，并完成核验、隔离、抢修、试压与恢复。</p><pre>GET /health
-GET /api/state
-POST /api/items
-POST /api/items/{id}/sources
-POST /api/items/{id}/actions</pre></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>燃气泄漏分级响应调度台</title>
+<style>
+  :root {
+    --general:#1f7a3a; --major:#b8770a; --critical:#b42318;
+    --bg:#f4f6f8; --card:#fff; --line:#e2e6ea; --muted:#6b7280;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:#1f2937; }
+  header { background:#10243a; color:#fff; padding:16px 24px; }
+  header h1 { margin:0 0 4px; font-size:19px; }
+  header p { margin:0; font-size:13px; color:#b9c6d4; }
+  main { padding:20px 24px 48px; max-width:1180px; margin:0 auto; }
+  .toolbar { display:flex; gap:10px; align-items:center; margin-bottom:14px; flex-wrap:wrap; }
+  .toolbar button { border:1px solid var(--line); background:#fff; border-radius:6px; padding:7px 12px; cursor:pointer; font-size:13px; }
+  .toolbar button.active { background:#10243a; color:#fff; border-color:#10243a; }
+  .toolbar .meta { color:var(--muted); font-size:12px; margin-left:auto; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr)); gap:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; box-shadow:0 1px 2px rgba(16,24,40,.05); }
+  .card-top { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+  .card-top .id { font-weight:600; font-size:15px; }
+  .seg { color:var(--muted); font-size:12px; }
+  .badge { font-size:12px; font-weight:600; color:#fff; border-radius:999px; padding:2px 10px; white-space:nowrap; }
+  .badge.general { background:var(--general); }
+  .badge.major { background:var(--major); }
+  .badge.critical { background:var(--critical); }
+  .badge.status { background:#445066; }
+  .badge.recurrence { background:#5b3fa0; }
+  .timer { font-size:13px; padding:8px 10px; border-radius:8px; margin:8px 0; background:#f0f4f8; display:flex; justify-content:space-between; gap:8px; }
+  .timer.overdue { background:#fef3f2; color:var(--critical); font-weight:600; }
+  .timer.done { background:#ecfdf3; color:var(--general); }
+  .timer .step { color:var(--muted); font-weight:400; }
+  .timer.done .step, .timer.overdue .step { color:inherit; }
+  .row { display:flex; justify-content:space-between; font-size:12px; color:var(--muted); margin-top:6px; gap:8px; }
+  .section { margin-top:10px; border-top:1px dashed var(--line); padding-top:8px; }
+  .section h4 { margin:0 0 6px; font-size:12px; color:#374151; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { font-size:12px; background:#eef2f6; border-radius:6px; padding:2px 8px; }
+  .chip.seg { background:#e8f0fe; color:#174ea6; }
+  .chip.cust { background:#fef3e6; color:#9a5a06; }
+  ul.hist { margin:0; padding-left:18px; font-size:12px; color:#374151; }
+  ul.hist li { margin-bottom:4px; }
+  ul.hist .why { color:var(--muted); }
+  .recur { font-size:12px; background:#f5f2ff; border:1px solid #d9cefa; color:#4c2f91; padding:6px 8px; border-radius:8px; margin-top:8px; }
+  .score { font-size:12px; color:var(--muted); }
+  .empty { color:var(--muted); font-size:13px; padding:30px; text-align:center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>燃气泄漏分级响应调度台</h1>
+  <p>按评分分档（一般 / 较大 / 重大）· 重大事件上报后 30 分钟内完成现场核验 · 超时自动升一档并记录卡点 · 隔离必须携带核验登记的影响面</p>
+</header>
+<main>
+  <div class="toolbar">
+    <button data-filter="" class="active">全部</button>
+    <button data-filter="reported">待核验</button>
+    <button data-filter="verified">待隔离</button>
+    <button data-filter="isolated">待修复</button>
+    <button data-filter="repaired">待试压</button>
+    <button data-filter="tested">待恢复</button>
+    <button data-filter="restored">已恢复</button>
+    <button data-filter="cancelled">已取消</button>
+    <span class="meta" id="meta"></span>
+  </div>
+  <div class="grid" id="grid"></div>
+</main>
+<script>
+const STATUS_LABELS = {
+  reported:"待核验", verified:"待隔离", isolated:"隔离中/待修复", repaired:"待试压",
+  tested:"待恢复供气", restored:"已恢复供气", cancelled:"已取消"
+};
+const HIST_TYPE_LABELS = {
+  overdue_escalation:"超时自动升级", overdue_top_alert:"重大档持续告警", verification_upgrade:"核验升级"
+};
+let allItems = [];
+let currentFilter = "";
+
+function fmtTime(iso){
+  if(!iso) return "—";
+  const d = new Date(iso);
+  return d.toLocaleString("zh-CN", {hour12:false});
+}
+function fmtRemaining(seconds){
+  if(seconds === null || seconds === undefined) return "—";
+  const neg = seconds < 0;
+  let s = Math.abs(seconds);
+  const h = Math.floor(s/3600); s -= h*3600;
+  const m = Math.floor(s/60); s -= m*60;
+  const parts = [];
+  if(h) parts.push(h+"小时");
+  if(m || h) parts.push(m+"分");
+  parts.push(s+"秒");
+  return (neg ? "已超时 " : "剩余 ") + parts.join("");
+}
+function el(tag, cls, text){
+  const e = document.createElement(tag);
+  if(cls) e.className = cls;
+  if(text !== undefined) e.textContent = text;
+  return e;
+}
+
+function timerCard(item){
+  const r = item.response;
+  const box = el("div", "timer");
+  if(!r){ box.textContent = "暂无响应时限信息"; return box; }
+  const overdue = r.overdue && r.completed_at === null;
+  const done = !!r.completed_at;
+  if(overdue) box.classList.add("overdue");
+  if(done) box.classList.add("done");
+  const left = el("div");
+  const t = el("div", null, done ? ("核验完成 · "+fmtTime(r.completed_at)) : fmtRemaining(r.remaining_seconds));
+  const step = el("div", "step", "当前卡点：" + (r.blocked_step_label || STATUS_LABELS[item.status] || item.status));
+  left.append(t, step);
+  const right = el("div", null, "时限 " + r.sla_minutes + " 分钟");
+  box.append(left, right);
+  return box;
+}
+
+function impactCard(item){
+  const sec = el("div", "section");
+  sec.append(el("h4", null, "影响范围（核验登记）"));
+  const impact = item.impact || (item.payload && item.payload.impact);
+  if(!impact){
+    sec.append(el("div", "score", "尚未登记影响管段和下游用户"));
+    return sec;
+  }
+  const chips = el("div", "chips");
+  (impact.segments || []).forEach(s => chips.append(el("span", "chip seg", "管段 "+s)));
+  (impact.customers || []).forEach(c => chips.append(el("span", "chip cust", "用户 " + c.customer_id)));
+  sec.append(chips);
+  sec.append(el("div", "row", "登记时间：" + fmtTime(impact.registered_at)));
+  return sec;
+}
+
+function historyCard(item){
+  const r = item.response;
+  const hist = (r && r.history) || [];
+  const sec = el("div", "section");
+  sec.append(el("h4", null, "升级记录（" + hist.length + "）"));
+  if(!hist.length){ sec.append(el("div", "score", "暂无升级记录")); return sec; }
+  const ul = el("ul", "hist");
+  hist.forEach(h => {
+    const li = el("li");
+    const arrow = h.from_grade_label + " → " + h.to_grade_label;
+    li.append(el("b", null, (HIST_TYPE_LABELS[h.type] || h.type) + "：" + arrow));
+    li.appendChild(document.createElement("br"));
+    const why = el("span", "why", fmtTime(h.at) + (h.blocked_step_label ? " · 卡在「"+h.blocked_step_label+"」" : "") + " · " + (h.reason || ""));
+    li.append(why);
+    ul.append(li);
+  });
+  sec.append(ul);
+  return sec;
+}
+
+function recurrenceCard(item){
+  const notes = [];
+  if(item.recurrence_of){
+    const p = item.payload || {};
+    notes.push("本事件由已恢复事件 #" + item.recurrence_of + " 的新传感记录另立：" + (p.recurrence_note || "同管段复发迹象"));
+  }
+  (item.related_recurrences || []).forEach(r => {
+    notes.push("本事件恢复后又收到新记录，已另立关联事件 #" + r.recurrence_id + "（" + fmtTime(r.observed_at) + "，" + (r.relation||"") + "）");
+  });
+  if(!notes.length) return null;
+  const sec = el("div", "section");
+  notes.forEach(n => sec.append(el("div", "recur", n)));
+  return sec;
+}
+
+function renderItem(item){
+  const card = el("div", "card");
+  const grade = item.grade || (item.payload && item.payload.grade) || "general";
+  const label = item.response ? item.response.grade_label : grade;
+  const top = el("div", "card-top");
+  top.append(el("span", "id", "#" + item.id));
+  top.append(el("span", "badge " + grade, label));
+  top.append(el("span", "badge status", STATUS_LABELS[item.status] || item.status));
+  if(item.recurrence_of) top.append(el("span", "badge recurrence", "关联事件"));
+  card.append(top);
+
+  const p = item.payload || {};
+  card.append(el("div", "seg", p.pipeline_id + " / " + p.segment_id + " · 上报于 " + fmtTime(p.reported_at)));
+  const score = item.assessment || {};
+  card.append(el("div", "score", "评分 " + (score.score !== undefined ? score.score : "—") + " 分 · 报告人 " + (p.reporter || "—")));
+
+  card.append(timerCard(item));
+  card.append(impactCard(item));
+  card.append(historyCard(item));
+  const recur = recurrenceCard(item);
+  if(recur) card.append(recur);
+  return card;
+}
+
+function render(){
+  const grid = document.getElementById("grid");
+  grid.innerHTML = "";
+  const items = currentFilter ? allItems.filter(i => i.status === currentFilter) : allItems;
+  if(!items.length){ grid.append(el("div", "empty", "暂无事件")); }
+  items.forEach(i => grid.append(renderItem(i)));
+  document.getElementById("meta").textContent = "共 " + allItems.length + " 起 · 数据每 30 秒刷新 · 倒计时每秒更新";
+}
+
+async function load(){
+  const res = await fetch("/api/items");
+  const data = await res.json();
+  allItems = data.items || [];
+  render();
+}
+
+document.querySelectorAll(".toolbar button[data-filter]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".toolbar button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    currentFilter = btn.getAttribute("data-filter");
+    render();
+  });
+});
+
+load();
+setInterval(load, 30000);
+setInterval(render, 1000);
+</script>
+</body>
+</html>

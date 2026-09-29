@@ -20,6 +20,11 @@ class WorkflowTest(unittest.TestCase):
     def tearDown(self):
         os.unlink(self.tmp.name)
 
+    IMPACT = {
+        "affected_segments": ["S-8", "S-8-DOWN"],
+        "affected_customers": ["U-101", "U-102"],
+    }
+
     def test_complete_leak_workflow(self):
         item = self.service.create_item({
             "pipeline_id": "P-1",
@@ -30,9 +35,9 @@ class WorkflowTest(unittest.TestCase):
             "odor_reports": 3,
             "reporter": "dispatch-1",
         }, "dispatch-1", "dispatcher")
-        item = self.service.act(item["id"], "verify", {"field_confirmed": True}, "resp-1", "responder", item["version"])
+        item = self.service.act(item["id"], "verify", dict({"field_confirmed": True}, **self.IMPACT), "resp-1", "responder", item["version"])
         self.assertEqual(item["payload"]["assessment"]["level"], "critical")
-        item = self.service.act(item["id"], "isolate", {"valve_sequence": ["V-1", "V-2"]}, "sup-1", "supervisor", item["version"])
+        item = self.service.act(item["id"], "isolate", dict({"valve_sequence": ["V-1", "V-2"]}, **self.IMPACT), "sup-1", "supervisor", item["version"])
         item = self.service.act(item["id"], "repair", {"work_order": "WO-1"}, "tech-1", "technician", item["version"])
         item = self.service.act(item["id"], "pressure_test", {"test_passed": True, "pressure_kpa": 150, "minimum_pressure_kpa": 100}, "tech-1", "technician", item["version"])
         item = self.service.act(item["id"], "restore", {"hazards_clear": True}, "sup-1", "supervisor", item["version"])

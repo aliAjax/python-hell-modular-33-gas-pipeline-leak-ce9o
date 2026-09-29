@@ -27,6 +27,11 @@ class FailureTest(unittest.TestCase):
             "reporter": "dispatch-2",
         }
 
+    IMPACT = {
+        "affected_segments": ["S-4", "S-4-DOWN"],
+        "affected_customers": ["U-201"],
+    }
+
     def tearDown(self):
         os.unlink(self.tmp.name)
 
@@ -35,19 +40,29 @@ class FailureTest(unittest.TestCase):
         with self.assertRaises(ConflictError):
             self.service.create_item(self.payload, "d", "dispatcher")
         item["payload"]["valve_status_conflict"] = False
-        item = self.service.act(item["id"], "verify", {"field_confirmed": True}, "r", "responder", item["version"])
+        item = self.service.act(item["id"], "verify", dict({"field_confirmed": True}, **self.IMPACT), "r", "responder", item["version"])
+        # 没登记影响面的隔离退回重填
         with self.assertRaises(DomainError) as context:
             self.service.act(item["id"], "isolate", {"valve_sequence": ["V-1"]}, "s", "supervisor", item["version"])
+        self.assertEqual(context.exception.code, "impact_required")
+        # 阀门数量不足
+        with self.assertRaises(DomainError) as context:
+            self.service.act(item["id"], "isolate", dict({"valve_sequence": ["V-1"]}, **self.IMPACT), "s", "supervisor", item["version"])
         self.assertEqual(context.exception.code, "valve_sequence_required")
+        # 影响面与登记不一致退回重填
+        bad_impact = {"affected_segments": ["S-4", "OTHER"], "affected_customers": ["U-201"]}
+        with self.assertRaises(DomainError) as context:
+            self.service.act(item["id"], "isolate", dict({"valve_sequence": ["V-1", "V-2"]}, **bad_impact), "s", "supervisor", item["version"])
+        self.assertEqual(context.exception.code, "impact_mismatch")
 
     def test_version_conflict_and_permission(self):
         item = self.service.create_item(self.payload, "d", "dispatcher")
         with self.assertRaises(DomainError) as context:
-            self.service.act(item["id"], "verify", {"field_confirmed": True}, "x", "sensor", item["version"])
+            self.service.act(item["id"], "verify", dict({"field_confirmed": True}, **self.IMPACT), "x", "sensor", item["version"])
         self.assertEqual(context.exception.status, 403)
-        item = self.service.act(item["id"], "verify", {"field_confirmed": True}, "r", "responder", item["version"])
+        item = self.service.act(item["id"], "verify", dict({"field_confirmed": True}, **self.IMPACT), "r", "responder", item["version"])
         with self.assertRaises(ConflictError):
-            self.service.act(item["id"], "isolate", {"valve_sequence": ["V-1", "V-2"]}, "s", "supervisor", item["version"] - 1)
+            self.service.act(item["id"], "isolate", dict({"valve_sequence": ["V-1", "V-2"]}, **self.IMPACT), "s", "supervisor", item["version"] - 1)
 
 
 if __name__ == "__main__":

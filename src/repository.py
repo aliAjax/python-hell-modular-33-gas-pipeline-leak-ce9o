@@ -237,6 +237,79 @@ class Repository:
         finally:
             conn.close()
 
+    def apply_escalation(self, item_id, expected_due_at, new_payload, audit_payload, actor, role):
+        """
+        系统 SLA 自动升级：仅当事件仍处于 reported 且 due_at 未被其它线程改动时写入，
+        避免重复升级。不改变业务状态。
+        """
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            if row is None:
+                raise NotFoundError("item_not_found", "业务实体不存在")
+            stored = json.loads(row["payload"])
+            stored_sla = stored.get("response_sla") or {}
+            if row["status"] != "reported" or stored_sla.get("due_at") != expected_due_at:
+                conn.execute("ROLLBACK")
+                return self.get_item(item_id)
+            conn.execute(
+                "UPDATE items SET payload=?,updated_at=? WHERE id=?",
+                (canonical_json(new_payload), now_iso(), item_id),
+            )
+            self.append_audit(conn, item_id, "sla_escalation", actor, role, audit_payload)
+            conn.execute("COMMIT")
+            return self.get_item(item_id)
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            conn.close()
+
+    def append_item_audit(self, item_id, event_type, actor, role, payload):
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            exists = conn.execute("SELECT id FROM items WHERE id=?", (item_id,)).fetchone()
+            if exists is None:
+                raise NotFoundError("item_not_found", "业务实体不存在")
+            self.append_audit(conn, item_id, event_type, actor, role, payload)
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            conn.close()
+
+    def link_recurrence(self, item_id, new_payload, actor, role, audit_payload):
+        """在已恢复的父事件上登记复发关联事件指针，并追加审计。"""
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT id FROM items WHERE id=?", (item_id,)).fetchone()
+            if row is None:
+                raise NotFoundError("item_not_found", "业务实体不存在")
+            conn.execute(
+                "UPDATE items SET payload=?,updated_at=? WHERE id=?",
+                (canonical_json(new_payload), now_iso(), item_id),
+            )
+            self.append_audit(conn, item_id, "recurrence_linked", actor, role, audit_payload)
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            conn.close()
+
     def audit_trail(self, item_id):
         conn = self.connect()
         try:

@@ -87,3 +87,62 @@ def normalize_source(payload):
         "note": payload.get("note", ""),
     }
     return result
+
+
+def _clean_str_list(values, field, code):
+    if not isinstance(values, list) or not values:
+        raise DomainError(code, "%s 不能为空" % field)
+    result = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise DomainError(code, "%s 中存在无效条目" % field)
+        value = value.strip()
+        if value not in result:
+            result.append(value)
+    return result
+
+
+def normalize_impact(payload):
+    """
+    校验“受影响管段和下游用户”的登记/隔离请求载荷。
+    支持两种字段：affected_segments + affected_customers（客户标识字符串列表）
+    或 impact = {"segments": [...], "customers": [{"customer_id": ...}]}。
+    """
+    raw_segments = payload.get("affected_segments")
+    raw_customers = payload.get("affected_customers")
+    impact = payload.get("impact")
+    if isinstance(impact, dict) and raw_segments is None:
+        raw_segments = impact.get("segments")
+    if isinstance(impact, dict) and raw_customers is None:
+        raw_customers = impact.get("customers")
+
+    segments = _clean_str_list(raw_segments, "affected_segments", "affected_segments_required")
+
+    if not isinstance(raw_customers, list) or not raw_customers:
+        raise DomainError("affected_customers_required", "受影响下游用户不能为空")
+    customers = []
+    seen = set()
+    for entry in raw_customers:
+        if isinstance(entry, str):
+            if not entry.strip():
+                raise DomainError("affected_customers_invalid", "下游用户标识存在无效条目")
+            customer_id = entry.strip()
+            record = {"customer_id": customer_id}
+        elif isinstance(entry, dict):
+            customer_id = entry.get("customer_id")
+            if not isinstance(customer_id, str) or not customer_id.strip():
+                raise DomainError("affected_customers_invalid", "下游用户必须提供 customer_id")
+            customer_id = customer_id.strip()
+            record = {
+                "customer_id": customer_id,
+                "name": entry.get("name", "") if isinstance(entry.get("name", ""), str) else "",
+            }
+        else:
+            raise DomainError("affected_customers_invalid", "下游用户格式无效")
+        if customer_id in seen:
+            continue
+        seen.add(customer_id)
+        customers.append(record)
+    if not customers:
+        raise DomainError("affected_customers_required", "受影响下游用户不能为空")
+    return {"segments": segments, "customers": customers}
